@@ -1,0 +1,10 @@
+fetch('iwvl.json')
+  .then(response => response.json())
+  .then(data => {
+    // Aggiorna l'orario a schermo
+    document.getElementById('last-update').textContent = data.updated_display;
+
+    // Rendering dei grafici e segnali RAPTOR per IWVL
+    console.log("Dati IWVL caricati:", data);
+  })
+  .catch(err => console.error("Errore caricamento IWVL JSON:", err));
