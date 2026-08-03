@@ -1,8 +1,26 @@
-fetch('iwvl.json')
-  .then(response => response.json())
-  .then(data => {
-    document.getElementById('last-update').textContent = data.updated_display;
-    console.log("Dati IWVL caricati:", data);
-    // Qui aggiungi la tua logica di rendering per i grafici/segnali RAPTOR
-  })
-  .catch(err => console.error("Errore caricamento IWVL JSON:", err));
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAPTOR IWVL Dashboard</title>
+</head>
+<body>
+
+    <h1>Dashboard IWVL</h1>
+    <p>Ultimo aggiornamento: <span id="last-update">Caricamento in corso...</span></p>
+
+    <!-- FONDAMENTALE: Il codice JS deve stare dentro i tag <script> -->
+    <script>
+      fetch('iwvl.json')
+        .then(response => response.json()) // Corretto: response da entrambi i lati
+        .then(data => {
+          // Aggiorna la data a schermo
+          document.getElementById('last-update').textContent = data.updated_display;
+          console.log("Dati IWVL caricati con successo:", data);
+        })
+        .catch(err => console.error("Errore nel caricamento di IWVL JSON:", err));
+    </script>
+
+</body>
+</html>
