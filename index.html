@@ -4,19 +4,58 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RAPTOR IWVL Dashboard</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 2rem; background: #f4f6f9; color: #333; }
+        .card { background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 1rem; max-width: 400px; }
+        .valore { font-size: 1.5rem; font-weight: bold; color: #007bff; }
+        .status { padding: 4px 8px; border-radius: 4px; font-weight: bold; display: inline-block; }
+        .long { background: #d4edda; color: #155724; }
+        .cash { background: #f8d7da; color: #721c24; }
+    </style>
 </head>
 <body>
 
     <h1>Dashboard IWVL</h1>
-    <p>Ultimo aggiornamento: <span id="last-update">Caricamento in corso...</span></p>
+    <p>Ultimo aggiornamento: <strong id="last-update">Caricamento in corso...</strong></p>
 
-    <!-- FONDAMENTALE: Il codice JS deve stare dentro i tag <script> -->
+    <div class="card">
+        <h3>IWVL.MI (iShares World Value)</h3>
+        <p>Prezzo Chiusura: <span id="etp-price" class="valore">--</span></p>
+        <p>Segnale RAPTOR: <span id="raptor-signal" class="status">--</span></p>
+        <p>Antonacci 12M: <span id="antonacci-ret">--</span></p>
+    </div>
+
     <script>
       fetch('iwvl.json')
-        .then(response => response.json()) // Corretto: response da entrambi i lati
+        .then(response => response.json())
         .then(data => {
-          // Aggiorna la data a schermo
+          // 1. Data e ora
           document.getElementById('last-update').textContent = data.updated_display;
+
+          // 2. Prezzi e Segnali
+          const closes = data.etp.closes;
+          const signals = data.etp.signals;
+          const ultimoPrezzo = closes[closes.length - 1];
+          const ultimoSegnale = signals[signals.length - 1];
+
+          document.getElementById('etp-price').textContent = "€ " + ultimoPrezzo;
+          
+          const elemSignal = document.getElementById('raptor-signal');
+          if (ultimoSegnale === 1) {
+              elemSignal.textContent = "LONG (1)";
+              elemSignal.className = "status long";
+          } else {
+              elemSignal.textContent = "FLAT / CASH (0)";
+              elemSignal.className = "status cash";
+          }
+
+          // 3. Antonacci Dual Momentum
+          if (data.antonacci_etp_latest) {
+              const ret = data.antonacci_etp_latest.ret_12m;
+              const sig = data.antonacci_etp_latest.signal;
+              document.getElementById('antonacci-ret').textContent = `${ret}% [${sig}]`;
+          }
+
           console.log("Dati IWVL caricati con successo:", data);
         })
         .catch(err => console.error("Errore nel caricamento di IWVL JSON:", err));
