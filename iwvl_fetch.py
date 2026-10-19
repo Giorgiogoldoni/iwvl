@@ -1,184 +1,126 @@
+#!/usr/bin/env python3
+"""
+iwvl_fetch.py
+Scarica lo storico di IWVL.MI, applica il motore scannerv3 (engine_scannerv3.py, copia
+IDENTICA di fetch_azionario.py del repo azionario) e scrive:
+  - iwvl.json                     riepilogo (stesso schema di azionario.json, un solo titolo)
+  - data/charts/IWVL_MI.json      serie storiche + indicatori per il grafico
+  - regole/IWVL_MI_Regole.html    scheda regole operative (stampabile in PDF)
+
+Il motore NON va modificato qui: per aggiornare la logica dei segnali si ricopia
+fetch_azionario.py sopra engine_scannerv3.py.
+"""
+
 import json
 import math
+import sys
 from datetime import datetime, time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
+import engine_scannerv3 as eng
+
 # --- CONFIGURAZIONE ---
-TICKER_ETP = "IWVL.MI"                 # iShares Edge MSCI World Value Factor
+TICKER = "IWVL.MI"
+NOME = "iShares Edge MSCI World Value Factor UCITS ETF"
+PERIODO = "2y"                          # 2 anni di segnali ed entrate/uscite (standard scannerv3)
 TZ = ZoneInfo("Europe/Rome")
-CHIUSURA_BORSA = time(17, 45)          # Borsa Italiana chiude 17:30 (+ margine consolidamento dati)
-BARRE_MAX = 756                        # ~3 anni di sedute
-MAX_ETA_ULTIMA_BARRA_GG = 6            # oltre questa soglia il job fallisce (dati vecchi)
-OUTPUT_FILE = "iwvl.json"
+CHIUSURA_BORSA = time(17, 45)           # Borsa Italiana chiude 17:30 (+ margine consolidamento)
+MAX_ETA_ULTIMA_BARRA_GG = 6             # oltre: il job fallisce invece di pubblicare dati vecchi
+
+ROOT = Path(__file__).parent
+OUT_JSON = ROOT / "iwvl.json"
+FILE_STEM = TICKER.replace(".", "_").replace("-", "_")      # IWVL_MI (come fileFor() nel browser)
 
 
-# --- FUNZIONI DI CALCOLO INDICATORI ---
-def calc_er(prices, n=10):
-    """Efficiency Ratio di Kaufman."""
-    change = (prices - prices.shift(n)).abs()
-    volatility = prices.diff().abs().rolling(n).sum()
-    er = change / volatility.replace(0, np.nan)
-    return er.fillna(0.0).where(volatility.notna(), np.nan)
-
-
-def calc_kama(prices, n=10, pow1=2, pow2=30):
-    """Kaufman Adaptive Moving Average. Lavora su array numpy (nessun accesso per indice-data)."""
-    p = prices.to_numpy(dtype=float)
-    kama = np.full(len(p), np.nan)
-    if len(p) <= n:
-        return pd.Series(kama, index=prices.index)
-
-    er = calc_er(prices, n).fillna(0.0).to_numpy()
-    fast_sc = 2 / (pow1 + 1)
-    slow_sc = 2 / (pow2 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-
-    kama[:n] = p[:n]
-    for i in range(n, len(p)):
-        kama[i] = kama[i - 1] + sc[i] * (p[i] - kama[i - 1])
-    return pd.Series(kama, index=prices.index)
-
-
-def calc_rsi(prices, period=14):
-    """RSI con smoothing di Wilder (coerente con TradingView)."""
-    delta = prices.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.where(avg_loss != 0, 100.0).where(avg_loss.notna(), np.nan)
-
-
-def calc_ao(df):
-    """Awesome Oscillator."""
-    median_price = (df["High"] + df["Low"]) / 2
-    return median_price.rolling(5).mean() - median_price.rolling(34).mean()
-
-
-def fmt_list(series, dec=2):
-    """Serie pandas/numpy -> lista Python pulita per il JSON."""
-    res = []
-    for v in series:
-        if pd.isna(v) or math.isnan(v) or math.isinf(v):
-            res.append(None)
-        else:
-            res.append(round(float(v), dec))
-    return res
-
-
-def clean_dict(obj):
-    """Pulisce ricorsivamente NaN e Inf prima della serializzazione JSON."""
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return round(obj, 4)
-    elif isinstance(obj, dict):
-        return {k: clean_dict(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [clean_dict(v) for v in obj]
+def pulisci(obj):
+    """Converte tipi numpy e sostituisce NaN/Inf con None (JSON valido per il browser)."""
+    if isinstance(obj, dict):
+        return {k: pulisci(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [pulisci(v) for v in obj]
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        v = float(obj)
+        return None if (math.isnan(v) or math.isinf(v)) else v
     return obj
 
 
-# --- MAIN ---
-def main():
-    now = datetime.now(TZ)
-    print(f"Scaricamento dati per {TICKER_ETP} ({now.strftime('%d/%m/%Y %H:%M')} Europe/Rome)...")
-
-    etp_df = yf.Ticker(TICKER_ETP).history(period="max", auto_adjust=True)
-    if etp_df.empty:
-        raise ValueError(f"Impossibile recuperare i dati per {TICKER_ETP}")
-
-    etp_df = etp_df.dropna(subset=["Close", "High", "Low"])
+def scarica(now):
+    df = yf.Ticker(TICKER).history(period=PERIODO, auto_adjust=True)
+    if df.empty:
+        raise ValueError(f"Impossibile recuperare i dati per {TICKER}")
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
 
     # Esclude la barra del giorno se la seduta e' ancora in corso (dato parziale)
-    partial_excluded = False
+    parziale = False
     seduta_in_corso = now.weekday() < 5 and now.time() < CHIUSURA_BORSA
-    if len(etp_df) > 0 and seduta_in_corso and etp_df.index[-1].date() == now.date():
-        etp_df = etp_df.iloc[:-1]
-        partial_excluded = True
-
-    if etp_df.empty:
+    if len(df) and seduta_in_corso and df.index[-1].date() == now.date():
+        df = df.iloc[:-1]
+        parziale = True
+    if df.empty:
         raise ValueError("Nessuna barra completa disponibile")
 
     # Controllo staleness: meglio far fallire il job che pubblicare dati vecchi
-    last_date = etp_df.index[-1].date()
-    eta_gg = (now.date() - last_date).days
-    if eta_gg > MAX_ETA_ULTIMA_BARRA_GG:
-        raise ValueError(
-            f"Ultima barra del {last_date} ({eta_gg} giorni fa): dati troppo vecchi, JSON non aggiornato"
-        )
+    ultima = df.index[-1].date()
+    eta = (now.date() - ultima).days
+    if eta > MAX_ETA_ULTIMA_BARRA_GG:
+        raise ValueError(f"Ultima barra del {ultima} ({eta} giorni fa): dati troppo vecchi, file non aggiornati")
+    return df, ultima, parziale
 
-    etp = etp_df.tail(BARRE_MAX).copy()
-    closes = etp["Close"]
 
-    # Indicatori
-    kama_fast = calc_kama(closes, n=10)
-    kama_slow = calc_kama(closes, n=30)
-    rsi14 = calc_rsi(closes, period=14)
-    rsi5 = calc_rsi(closes, period=5)
-    ao = calc_ao(etp)
+def main():
+    now = datetime.now(TZ)
+    print(f"Scaricamento {TICKER} ({now.strftime('%d/%m/%Y %H:%M')} Europe/Rome)...")
+    df, ultima, parziale = scarica(now)
 
-    er_series = calc_er(closes, n=10)
-    er_last = er_series.iloc[-1]
-    er_val = round(float(er_last), 4) if not pd.isna(er_last) else 0.0
+    out = eng.compute_indicators(df)
+    if out is None:
+        raise ValueError("Storico insufficiente per calcolare gli indicatori")
+    summary, chart = out
 
-    # Segnale RAPTOR base: 1 se KAMA fast > KAMA slow, altrimenti 0
-    signals = np.where(kama_fast > kama_slow, 1, 0)
-    changes = np.flatnonzero(np.diff(signals) != 0)
-    start = int(changes[-1]) + 1 if len(changes) else 0
-    signal_since = etp.index[start].strftime("%Y-%m-%d")
-    signal_bars = int(len(signals) - start)
-
-    # Momentum assoluto 12M (252 sedute): NON e' un Dual Momentum completo
-    ret_12m_series = closes.pct_change(252) * 100
-    ret_12m_last = ret_12m_series.iloc[-1]
-    ret_12m_val = round(float(ret_12m_last), 2) if not pd.isna(ret_12m_last) else 0.0
-    ant_signal = "LONG" if ret_12m_val > 0 else "CASH"
-
-    output = {
-        "execution_type": "close" if now.time() >= CHIUSURA_BORSA else "morning",
-        "updated_at": now.isoformat(),
-        "updated_display": now.strftime("%d/%m/%Y %H:%M"),
-        "timezone": "Europe/Rome",
-        "last_bar_date": last_date.strftime("%Y-%m-%d"),
-        "last_bar_display": last_date.strftime("%d/%m/%Y"),
-        "partial_bar_excluded": partial_excluded,
-        "etp": {
-            "dates": [d.strftime("%Y-%m-%d") for d in etp.index],
-            "closes": fmt_list(closes, 2),
-            "highs": fmt_list(etp["High"], 2),
-            "lows": fmt_list(etp["Low"], 2),
-            "volumes": [int(v) if not pd.isna(v) else 0 for v in etp["Volume"]],
-            "kama_fast": fmt_list(kama_fast, 2),
-            "kama_slow": fmt_list(kama_slow, 2),
-            "rsi14": fmt_list(rsi14, 2),
-            "rsi5": fmt_list(rsi5, 2),
-            "ao": fmt_list(ao, 2),
-            "er": er_val,
-            "signals": signals.tolist(),
-            "signal_since": signal_since,
-            "signal_bars": signal_bars,
-        },
-        "antonacci_etp_latest": {
-            "ret_12m": ret_12m_val,
-            "signal": ant_signal,
-            "tipo": "momentum assoluto 12M (rendimento > 0), non Dual Momentum",
-        },
+    tv = eng.tv_symbol(TICKER)                                  # MIL:IWVL
+    riga = {
+        "regione": "ISHARES", "nome": NOME, "ticker": TICKER, "settore": "ETF Value World",
+        "paese": "World", "exchange": None, "tv_symbol": tv, **summary,
     }
 
-    output = clean_dict(output)
+    (ROOT / "data" / "charts").mkdir(parents=True, exist_ok=True)
+    (ROOT / "regole").mkdir(parents=True, exist_ok=True)
 
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    (ROOT / "data" / "charts" / f"{FILE_STEM}.json").write_text(
+        json.dumps(pulisci(chart), ensure_ascii=False, allow_nan=False), encoding="utf-8")
 
-    print(f"{OUTPUT_FILE} generato: ultima barra {last_date}, barra parziale esclusa: {partial_excluded}")
+    (ROOT / "regole" / f"{FILE_STEM}_Regole.html").write_text(
+        eng.build_regole_html(NOME, TICKER, summary, {"regione": "ISHARES", "tv_symbol": tv}),
+        encoding="utf-8")
+
+    OUT_JSON.write_text(json.dumps(pulisci({
+        "generato": now.isoformat(timespec="seconds"),
+        "generato_display": now.strftime("%d/%m/%Y %H:%M"),
+        "timezone": "Europe/Rome",
+        "ultima_barra": ultima.strftime("%Y-%m-%d"),
+        "ultima_barra_display": ultima.strftime("%d/%m/%Y"),
+        "barra_parziale_esclusa": parziale,
+        "totale": 1,
+        "errori": [],
+        "titoli": [riga],
+    }), ensure_ascii=False, allow_nan=False), encoding="utf-8")
+
+    print(f"OK: ultima barra {ultima}, barra parziale esclusa: {parziale}, "
+          f"segnale {summary['segnale']}, rating {summary['rating']}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:                                      # job rosso su GitHub Actions
+        print(f"ERRORE: {e}", file=sys.stderr)
+        raise
