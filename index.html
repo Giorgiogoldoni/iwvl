@@ -372,6 +372,33 @@ function historyTableHTML(chart){
   </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
+function renderKamaCloudComparison(etp){
+ const valid=[];for(let i=0;i<etp.dates.length;i++)if(etp.closes[i]!=null&&etp.highs[i]!=null&&etp.lows[i]!=null&&Number.isFinite(+etp.closes[i]))valid.push(i);
+ const N=valid.length;if(N<180)return;const C=valid.map(i=>+etp.closes[i]),H=valid.map(i=>+etp.highs[i]),L=valid.map(i=>+etp.lows[i]),D=valid.map(i=>etp.dates[i]);
+ const kama=(a,p)=>{let o=Array(a.length).fill(null),f=2/3,s=2/31;if(a.length<=p)return o;o[p]=a[p];for(let i=p+1;i<a.length;i++){let ch=Math.abs(a[i]-a[i-p]),v=0;for(let j=i-p+1;j<=i;j++)v+=Math.abs(a[j]-a[j-1]);let er=v?ch/v:0,sc=Math.pow(er*(f-s)+s,2);o[i]=o[i-1]+sc*(a[i]-o[i-1]);}return o;};
+ const src=valid.map(i=>(+etp.highs[i]+ +etp.lows[i]+2*+etp.closes[i])/4),ks=[];for(let p=5;p<=90;p+=5)ks.push(kama(src,p));ks.push(kama(src,100));const k100=kama(C,100),dist=Array(N).fill(null),l2=Array(N).fill(null),l3=Array(N).fill(null),w=Array(N).fill(null);
+ for(let i=0;i<N;i++){if(ks.some(k=>k[i]==null)||k100[i]==null)continue;let z=0;for(let j=0;j<ks.length-1;j++)z+=(ks[j][i]-ks[j+1][i])/ks[j+1][i];dist[i]=z/(ks.length-1);l2[i]=k100[i]*(1+10*dist[i]);w[i]=Math.max(...ks.map(k=>k[i]))-Math.min(...ks.map(k=>k[i]));}
+ let f=l2.findIndex(v=>v!=null);if(f>=0)kama(l2.slice(f),10).forEach((v,j)=>l3[f+j]=v);
+ const tr=C.map((v,i)=>i?Math.max(H[i]-L[i],Math.abs(H[i]-C[i-1]),Math.abs(L[i]-C[i-1])):H[i]-L[i]),atr=Array(N).fill(null);for(let i=13;i<N;i++)atr[i]=tr.slice(i-13,i+1).reduce((a,b)=>a+b,0)/14;
+ const wn=w.map((v,i)=>atr[i]?v/atr[i]:null),pct=Array(N).fill(null);for(let i=100;i<N;i++){let hist=wn.slice(i-100,i).filter(Number.isFinite);if(hist.length>=60&&Number.isFinite(wn[i]))pct[i]=hist.filter(v=>v<=wn[i]).length/hist.length;}
+ const bull=Array(N).fill(false),b5=Array(N).fill(false),s5=Array(N).fill(false),contract=Array(N).fill(false),weak=Array(N).fill(false);
+ for(let i=1;i<N;i++){bull[i]=dist[i]!=null&&l2[i]!=null&&l3[i]!=null&&dist[i]>0&&l2[i]>l3[i];if(i>=5){b5[i]=C[i]>Math.max(...H.slice(i-5,i));s5[i]=C[i]<Math.min(...L.slice(i-5,i));}}
+ const entry=i=>b5[i]&&bull[i];
+ const run=(start,end,threshold,days,record=false)=>{let pos=false,eq=1,peak=1,dd=0,ex=0,entries=0,exits=0,curve=[{i:start,v:100}];for(let i=100;i<start;i++){if(!pos&&entry(i))pos=true;else if(pos&&(s5[i]||!bull[i]))pos=false;}
+ for(let i=start+1;i<=end;i++){let r=C[i]/C[i-1]-1;if(pos){eq*=1+r;ex++;}peak=Math.max(peak,eq);dd=Math.min(dd,eq/peak-1);if(record)curve.push({i,v:eq*100});let narrowing=true,weakening=true;for(let j=0;j<days;j++){if(i-j<1||!(wn[i-j]<wn[i-j-1]))narrowing=false;if(i-j<1||!(dist[i-j]!=null&&dist[i-j-1]!=null&&dist[i-j]<dist[i-j-1]))weakening=false;}
+ if(!pos&&entry(i)){pos=true;entries++;}else if(pos&&(s5[i]||!bull[i]||(pct[i]!=null&&pct[i]<=threshold&&narrowing&&weakening))){pos=false;exits++;}}
+ return {ret:(eq-1)*100,dd:dd*100,exposure:ex/Math.max(1,end-start)*100,entries,exits,curve};};
+ const trainEnd=Math.floor(100+(N-101)*.70),grid=[];for(const threshold of [.15,.20,.25,.30,.40])for(const days of [2,3,4,5]){const z=run(100,trainEnd,threshold,days);grid.push({threshold,days,...z,score:z.ret+0.75*z.dd});}
+ grid.sort((a,b)=>b.score-a.score);const best=grid[0],oosStart=trainEnd;
+ const oos=run(oosStart,N-1,best.threshold,best.days,true),bhOos=C[N-1]/C[oosStart]-1;
+ const fmt=x=>(x>=0?'+':'')+x.toFixed(2)+'%';
+ const splitDate=D[trainEnd];
+ const allRows=grid.map((g,i)=>'<tr><td>'+(i+1)+'</td><td>'+(g.threshold*100).toFixed(0)+'%</td><td>'+g.days+'</td><td>'+fmt(g.ret)+'</td><td>'+fmt(g.dd)+'</td><td>'+g.score.toFixed(2)+'</td></tr>').join('');
+ const periods=[6,12,36],metrics=periods.map(m=>{let cut=new Date(D[N-1]);cut.setMonth(cut.getMonth()-m);let st=D.findIndex(v=>new Date(v)>=cut);st=Math.max(100,st);const hy=run(st,N-1,best.threshold,best.days),bh=C[N-1]/C[st]-1;return {m,hy:hy.ret,bh:bh*100,dd:hy.dd,ex:hy.exposure,ops:hy.exits};});
+ document.getElementById('kamaCloudTable').innerHTML='<b>Ottimizzazione solo sul 70% iniziale (training)</b><div style="font-size:12px;color:var(--text2);margin:4px 0 8px">Obiettivo: rendimento + 0,75 × drawdown (drawdown negativo). Parametri scelti automaticamente, poi congelati sul 30% finale.</div><table style="width:100%;border-collapse:collapse;font-size:12px"><tr><th>#</th><th>Squeeze</th><th>Gg contr.</th><th>Rend.</th><th>DD</th><th>Score</th></tr>'+allRows+'</table><div style="margin:12px 0;padding:10px;border:1px solid var(--border);border-radius:8px"><b>Verifica fuori campione — parametri congelati</b><div>Training fino al '+splitDate+' · test dal giorno successivo</div><div>Scelta: percentile '+(best.threshold*100).toFixed(0)+'%, contrazione '+best.days+' sedute</div><div>Hybrid OOS: <b>'+fmt(oos.ret)+'</b> · Buy &amp; Hold OOS: <b>'+fmt(bhOos*100)+'</b> · DD Hybrid: '+fmt(oos.dd)+' · esposizione '+oos.exposure.toFixed(1)+'% · uscite '+oos.exits+'</div></div><b>Hybrid su finestre mobili</b><table style="width:100%;border-collapse:collapse;font-size:12px"><tr><th>Periodo</th><th>Hybrid</th><th>B&amp;H</th><th>Delta</th><th>DD</th><th>Investito</th><th>Uscite</th></tr>'+metrics.map(x=>'<tr><td>'+x.m+'m</td><td>'+fmt(x.hy)+'</td><td>'+fmt(x.bh)+'</td><td>'+fmt(x.hy-x.bh)+'</td><td>'+fmt(x.dd)+'</td><td>'+x.ex.toFixed(1)+'%</td><td>'+x.ops+'</td></tr>').join('')+'</table><div style="font-size:11px;color:var(--text2);margin-top:8px">Nuvola = 19 KAMA, ampiezza spread/ATR14, percentile mobile 100 sedute. Ingresso: breakout Kamal5 + cloud bullish. Uscita: SELL Kamal5, cloud bearish oppure contrazione ampiezza per N sedute + indebolimento distanza KAMA + percentile sotto soglia. Segnali alla chiusura, rendimento dalla seduta successiva. No costi/slippage. Risultati preliminari, non validazione definitiva.</div>';
+ const el=document.getElementById('kamaCloudEquity');if(el){const curve=oos.curve,W=el.clientWidth||600,HH=220,p=28,all=curve.map(z=>z.v).concat(curve.map((z,i)=>100*C[z.i]/C[oosStart])),mn=Math.min(...all),mx=Math.max(...all),rg=mx-mn||1,x=i=>p+i/Math.max(1,curve.length-1)*(W-2*p),y=v=>HH-p-(v-mn)/rg*(HH-2*p),path=a=>a.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+','+y(v).toFixed(1)).join(' '),hold=curve.map(z=>100*C[z.i]/C[oosStart]);el.innerHTML='<svg viewBox="0 0 '+W+' '+HH+'" width="100%" height="'+HH+'"><line x1="'+p+'" x2="'+(W-p)+'" y1="'+y(100)+'" y2="'+y(100)+'" stroke="var(--border)" stroke-dasharray="4 4"/><path d="'+path(hold)+'" fill="none" stroke="#64748b" stroke-width="2"/><path d="'+path(curve.map(z=>z.v))+'" fill="none" stroke="#16a34a" stroke-width="2.5"/><text x="'+p+'" y="14" font-size="11" fill="var(--text2)">OOS Base 100 · Hybrid '+fmt(oos.ret)+' · B&amp;H '+fmt(bhOos*100)+'</text><text x="'+p+'" y="'+(HH-5)+'" font-size="10" fill="var(--text2)">'+D[oosStart]+'</text><text x="'+(W-p)+'" y="'+(HH-5)+'" text-anchor="end" font-size="10" fill="var(--text2)">'+D[N-1]+'</text></svg><div style="font-size:11px;color:var(--text2)">● Hybrid (verde) · ● Buy &amp; Hold (grigio) · campione fuori dall\'ottimizzazione</div>';}
+}
+
 function buildChartHTML(row, chart){
   const dates = chart.date || [];
   const ultimaData = dates[dates.length-1];
@@ -397,6 +424,12 @@ function buildChartHTML(row, chart){
     <div class="chart-panel">
       <div id="chartSvgWrap"></div>
       <div id="chartLegend" style="display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--text2);font-family:var(--font-cond);margin-top:6px;padding:0 4px"></div>
+    </div>
+
+    <div class="section-title">KAMA Cloud + Kamal5 · Strategia ibrida</div>
+    <div class="chart-panel" style="padding:12px">
+      <div id="kamaCloudTable" style="font-size:12px;color:var(--text2)">Calcolo strategia in corso…</div>
+      <div id="kamaCloudEquity" style="width:100%;margin-top:10px"></div>
     </div>
 
     <div class="section-title">Storia Trade</div>
@@ -674,6 +707,7 @@ async function load(){
       'Aggiornato: ' + META.generato_display + ' · ultima barra: ' + META.ultima_barra_display;
     root.innerHTML = buildChartHTML(ROW, CHART);
     renderChartSVG(CHART, ROW);
+    renderKamaCloudComparison({dates:CHART.date,closes:CHART.close,highs:CHART.high,lows:CHART.low});
   }catch(e){
     root.innerHTML = '<div class="loading">Dati non disponibili: ' + e.message +
       '<br><span style="font-size:11px">Se è la prima installazione, lancia il workflow "Update IWVL Dashboard Data" da GitHub → Actions.</span></div>';
